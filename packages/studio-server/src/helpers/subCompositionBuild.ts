@@ -52,12 +52,14 @@ export class SubCompositionDeadlineError extends Error {
 }
 
 export const SUB_COMPOSITION_DEADLINE_MS = 30_000;
+/** Long past any real root page: only a stuck worker reaches it, and the route then builds the page from disk. */
+export const ROOT_PREVIEW_DEADLINE_MS = 120_000;
 
 interface Pending {
   job: SubCompositionJob;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout> | undefined;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 /** The worker beside this module: the built .js in dist (studio-server's and the CLI's). From source, Bun runs the
@@ -115,8 +117,8 @@ function replace(from: Worker, failed?: Error): void {
   for (const [id, job] of pending) next.postMessage({ id, job: job.job });
 }
 
-/** `job` on the build worker, refused past `deadline` (performance.now() time; Infinity: never). Only the running job's
- * deadline ends the worker; a queued job past its own is dropped. @param compPath names the page in the refusal */
+/** `job` on the build worker, refused past `deadline` (performance.now() time). Only the running job's deadline ends
+ * the worker; a queued job past its own is dropped. @param compPath names the page in the refusal */
 export function runOffThread<J extends SubCompositionJob>(
   job: J,
   deadline: number,
@@ -124,16 +126,16 @@ export function runOffThread<J extends SubCompositionJob>(
 ): Promise<Result<J>> {
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    const refuse = () => {
-      const running = pending.keys().next().value === id;
-      pending.delete(id);
-      reject(new SubCompositionDeadlineError(compPath));
-      if (running && worker) replace(worker);
-    };
-    const timer = Number.isFinite(deadline)
-      ? setTimeout(refuse, Math.max(0, deadline - performance.now()))
-      : undefined;
-    timer?.unref?.();
+    const timer = setTimeout(
+      () => {
+        const running = pending.keys().next().value === id;
+        pending.delete(id);
+        reject(new SubCompositionDeadlineError(compPath));
+        if (running && worker) replace(worker);
+      },
+      Math.max(0, deadline - performance.now()),
+    );
+    timer.unref?.();
     pending.set(id, { job, resolve: resolve as (result: unknown) => void, reject, timer });
     (worker ??= startWorker()).postMessage({ id, job });
   });
